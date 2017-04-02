@@ -1,0 +1,399 @@
+---
+title: "DataTest"
+author: "Guanzhong You"
+date: "Apr 2, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Question 1
+
+Dataset   |     Method     |    Focus    |  n  |  p
+----------|----------------|-------------|-----|-----
+(a)Salary |   Regression   |  Inference  | 350 |  3  
+(b)Product| Classification |  Prediction |  31 | 13
+(c)Stock  |   Regression   |  Prediction |  52 |  3
+
+
+(a) This is a regression problem because salary is a continuous variable. It focuses on inference because we want only to figure out influential factors but not to predict.
+
+(b) This is a classification problem because response variable (Success/Fail) is a categorical variable. It focuses on prediction because the aim is to forecast the market reaction of a new product instead of to tell which factor influence a historical product's destiny. This problem may need feature selection or it will suffer from overfitting.
+
+(c) This is a regression problem because % change in dollar is a continuous variable. It focuses on prediction because the target is to tell the change of dollar given stock market information, not to analyze which stock market affect dollar most. This problem may employ elastic logarithm model.
+
+
+# Question 2
+
+## 1.Read Data
+
+* Import packages
+* Set working directory
+* Read in data
+
+```{r, message=FALSE, warning=FALSE}
+library(dplyr)
+library(plotly)
+library(Hmisc)
+library(psych)
+library(MASS)
+library(caret)
+library(pROC)
+library(xgboost)
+library(AER)
+setwd("C:/Users/Administrator/Desktop/test/data-analyst-data-test-master/data-analyst-data-test-master")
+RawData = read.csv("Cars_mileage.csv",stringsAsFactors = F)
+head(RawData,n=6)
+```
+
+## 2.Data Manipulation (Question 2.(a) Included) 
+
+* Create varible mpg_binary as required in Question 2.(a)
+* Create more potentially useful variables:
+    + **brand**: Different brands may have different design thinking in fuel efficiency. Most car's name starts with its brand name, so it's easy to seperate that apart.
+    + **gpm**: gallon per mile, whcih looks more like a variable that has a linear relation with other variables. E.g., one ton increase in weight could increase gpm by a certain amount.
+    + **sw**: whether it is Station Wagon. This is marked with(sw) after each car's name. Station Wagon may have a different fuel efficiency pattern compared to sedan, since its shape and structure is different.
+* Omit some NA data. Some rows has a "?" mark in horsepower. The number of those rows is very small so it is safe to simple delete those entries. No need for imputation, which brings in biases.
+* Change the sign of origin. The origin is marked with number. For further interpretation, I changed it to area name.
+
+```{r, warning=FALSE}
+MedianMPG = median(RawData$mpg)
+mpg_binary=as.integer(mpg>MedianMPG) # Question 2.(a) Here
+CarData = RawData %>%
+          mutate(horsepower=as.integer(horsepower)) %>%
+          filter(!is.na(horsepower)) %>%
+          mutate(mpg_binary=as.integer(mpg>MedianMPG)) %>%
+          mutate(brand=
+                   (regexpr(" ",name)-1)%>%
+                   ifelse((.==-2),nchar(name),.)%>%
+                   substr(x=name,start=1,stop=.))%>%
+          mutate(gpm=1/mpg)%>%
+          mutate(sw=grepl(pattern="\\(sw\\)",name))
+sumTable=CarData %>% 
+         group_by(as.factor(brand)) %>%
+         summarise(n=n())%>%
+         arrange(n)
+head(CarData)
+print(sumTable,n=38)
+```
+
+From above I found some typo in brand name. In addition, names of some cars contains only model name, instead of starting with a brand name. I searched the internet and found their brand names and mannually inserted. Following codes solve this problem.
+
+```{r, message=FALSE}
+attach(CarData)
+  brand[brand=="capri"]="ford"
+  brand[brand=="chevroelt"]="chevrolet"
+  brand[brand=="vokswagen"]="volkswagen"
+  brand[brand=="mercedes-benz"]="mercedes"
+  brand[brand=="chevroelt"]="chevrolet"
+  brand[brand=="hi"]="unknown"
+  brand[brand=="triumph"]="unknown"
+  brand[brand=="bmw"]="unknown"
+  brand[brand=="toyouta"]="toyota"
+  brand[brand=="cadillac"]="unknown"
+  brand[brand=="maxda"]="mazda"
+  brand[brand=="chevy"]="chevrolet"
+  brand[brand=="opel"]="unknown"
+  brand[brand=="saab"]="unknown"
+  brand[brand=="subaru"]="unknown"
+  brand[brand=="chrysler"]="unknown"
+  brand[brand=="volvo"]="unknown"
+  brand[brand=="vw"]="unknown"
+  brand[brand=="audi"]="unknown"
+  brand[brand=="fiat"]="unknown"
+  brand[brand=="peugeot"]="unknown"
+  brand[brand=="mercury"]="ford"
+  brand[brand=="mercedes"]="unknown"
+  brand[brand=="renault"]="unknown"
+  brand[brand=="datsun"]="nissan"
+  origin[origin==1]="American"
+  origin[origin==2]="European"
+  origin[origin==3]="Japan"
+  CarData$brand=capitalize(brand)
+  CarData$origin=factor(origin)
+detach(CarData)
+sumTable=CarData %>% 
+         group_by(brand) %>%
+         summarise(n=n(),avg_mpg=mean(mpg))%>%
+         arrange(avg_mpg)
+CarData$brand=factor(CarData$brand,levels=sumTable$`brand`,ordered = T)
+print(sumTable,n=14)
+head(CarData)
+```
+
+Now the data looks much tidier.
+
+## 3. Feature Exploration (Question 2.(b) Included)
+
+First, of course, we want to know the correlation between different variables.
+
+```{r, fig.height=10, fig.width=10, fig.align='center'}
+pairs.panels(CarData[,-c(9,10)],density=F,ellipses=F,
+             main="Feature Correlation")
+```
+
+
+
+From the correlation plot I found
+  
+i. **cylinder** is correlated with **mpg**, therefore this can be a useful variable for prediction.
+    
+ii. **displacement** is also correlated with **mpg**, but it worthes notice that it's highly correlated with **cylinder**. Multicollinearity might not be an issue in prediction, but it is trouble in interpretation.
+    
+iii. **horsepower** and **weight**  have similar case as **displacement**.
+    
+iv. **acceleration** has a "purer" but weaker correlation with **mpg**, but it's a potentially useful variable anyway.
+    
+v. **year** is also a useful variable since the fuel efficiency seems to evolve during those years. This pattern is more obvious when compared with **gpm**.
+    
+vi. **origin** is definitely a useful variable because Japan has a significant advantage in fuel efficiency.
+    
+vii. **brand** seems to be correlated with mpg, but this is doubious since the relation maybe caused by origin.
+    
+viii. **sw** looks like a factor influencing mpg, but as the data is unbalanced, this needed to be further tested.
+
+Next, I inspected some doubious correlation:
+
+#### A. **brand**
+
+I want to check whether mpg indeed varies by brands, or it just varies by origins.
+
+```{r, fig.align='center'}
+BrandPlot <- plot_ly(data=CarData, y = ~mpg, x=~brand,
+                     color = ~origin, type = "box")%>%
+             layout(title="MPG by Brands", 
+                    xaxis = list(title=""), yaxis =  list(title="MPG"))
+BrandPlot
+```
+
+
+
+All right, **brand** seems contribute no more information than origin, it can take a rest now.
+   
+#### B. **sw**
+```{r}
+t.test(CarData$mpg[CarData$sw==0],CarData$mpg[CarData$sw==1],
+       var.equal = F)
+```
+
+Small p-value shows that sw make a difference in car mpg, indicating that it could be a useful variable.
+
+Further, I want to check some interaction terms.
+
+#### C. **year** x **origin**  
+
+Different origin may have a different evolution path, maybe American car catch up faster in fuel efficiency than European.
+
+```{r, fig.align='center'}
+YearPlot<- plot_ly(data=CarData, y = ~mpg, x=~jitter(year),
+                   hoverinfo = 'text',
+                   text=~paste('Brand: ',brand,
+                               '</br> Name: ', capitalize(name), 
+                               '</br> MPG: ', mpg,
+                               '</br> Displacement: ', displacement),
+                   color = ~origin,type="scatter",mode="markers")%>%
+           layout(title="MPG by Year", 
+                  xaxis = list(title="Year"), 
+                  yaxis =  list(title="MPG"))
+YearPlot
+```
+
+The hypothesis seems to find its evidence from this plot. American cars have a clearly lower **mpg** in 1970 but later their mpg is more compariable with Japanese cars.
+
+#### D. **sw** x **origin**  
+
+Maybe state wagons with different origin have different fuel efficiency?
+
+```{r}
+aov.fit=aov(mpg~origin*sw,data=CarData)
+summary(aov.fit)
+```
+
+The interaction term has a high p-value for the null hypothesis: it's not useful.
+
+#### E. **displacement** / **horsepower** 
+
+Some car designs focus on luxury experience, while others focus on economics. So this variable could be useful in distinguish whether a car is luxury car or not.
+
+```{r, fig.align='center'}
+
+luxPlot=plot_ly(data=CarData, y = ~mpg, x=~I(displacement/horsepower),
+                   hoverinfo = 'text',
+                   text=~paste('Brand: ',brand,
+                               '</br> Name: ', capitalize(name), 
+                               '</br> MPG: ', mpg,
+                               '</br> Displacement: ', displacement),
+                   color=(~I(displacement/horsepower)>1.9),
+                   type="scatter",mode="markers")%>%
+        layout(title="Luxury vs Economics", 
+                  xaxis = list(title="Displacement/Horsepower ratio"), 
+                  yaxis =  list(title="MPG"))
+luxPlot
+
+```
+
+
+The pattern shows that those cars with **displacement/horsepower** > 1.9 seem to be luxury ones while the rest are more likely economic cars.
+
+```{r}
+CarData=mutate(CarData,luxury=(displacement/horsepower>1.9))
+CarData=mutate(CarData,dhratio=displacement/horsepower)
+
+```
+
+#### F. General View
+
+Finally, look at a big picture including all continuous variables
+
+```{r, fig.align='center'}
+ConPlot <- plot_ly(CarData, x = ~weight, y = ~horsepower, z = ~acceleration,size=~displacement, color = ~mpg) %>%
+  add_markers() %>%
+  layout(title="Global View",
+         scene = list(xaxis = list(title = 'Weight'),
+                      yaxis = list(title = 'Horsepower'),
+                      zaxis = list(title = 'Acceleration')))
+ConPlot
+
+```
+
+Looks like no more interaction terms is obvious from this graph.
+
+To conclude, seemingly useful variables includes: cylinder, displacement, horsepower, weight, acceleration, year, origin, sw, year\*origin, sw\*origin, displacement/horsepower
+
+## 4. Train/Test Partition (Question 2.(c))
+
+Seperate the data into training set and testing set. The partition ratio is 0.7, so there won't be too few data in each side.
+
+```{r}
+Train.ind = createDataPartition(CarData$mpg, p=0.7, list=FALSE)
+training = CarData[ Train.ind, ]
+testing = CarData[ -Train.ind, ]
+```
+
+## 5. Model Fitting (Question 2.(d))
+
+I choose logistics regression and decision tree. Reasons are:
+
+Methods               | Select  | Reason
+----------------------|---------|---------------------------------------
+Discriminant Analysis | No      | Bad for Categorical Variables
+KNN                   | No      | Curse of Dimension
+Decision Tree         | No      | Inferior to GBTree
+Random Forests        | No      | Insufficient Features
+LASSO regression      | No      | Inferior to Manual Variables Selection
+Ridge regression      | No      | Inferior to Manual Variables Selection
+Elastic Net Method    | No      | Inferior to Manual Variables Selection
+Logistics             | Yes     | Best Traditional Model for Binary Prediction
+GBTree                | Yes     | Good for Nonlinear Modeling
+
+
+#### A. Logistic Regression
+
+Before fitting a logistics regression, I want to "cheat" a little bit here by fitting a linear regression to **mpg**, try all possible variables and plausible interaction terms there. Then use stepwise regression to perform variable selection, and use selected variables to fit a logistics regression.
+
+```{r}
+m1=lm(data=training,mpg~cylinders+displacement+horsepower+weight+acceleration+year+origin+sw+year*origin+sw*origin+I(displacement/horsepower)+luxury*displacement+luxury*sw+luxury*weight+luxury*cylinders)
+summary(m1)
+```
+
+Most terms has a significant p value, some are not due to colinearity, which is not an issue in prediction scenario.
+
+```{r ,results="hide"}
+m2=stepAIC(m1,direction = "both")
+```
+
+```{r}
+summary(m2)
+```
+
+Use the significant terms to fit a logistics model. Also fit some reduced model for comparison.
+
+```{r, fig.align='center'}
+m3=glm(mpg_binary~cylinders+displacement+horsepower+weight+
+         acceleration+year+origin,
+       family=binomial(logit),data=training)
+
+summary(m3)
+m4=glm(mpg_binary~cylinders+displacement+horsepower+weight+
+         acceleration+year+origin+I(displacement/horsepower)+
+         luxury+year*origin+displacement*luxury+
+         weight*luxury+cylinders*luxury,
+       family=binomial(logit),data=training)
+summary(m4)
+m5=glm(mpg_binary~displacement+weight+
+         year+origin+
+         luxury+year*origin+displacement*luxury+
+         weight*luxury,
+       family=binomial(logit),data=training)
+summary(m5)
+anova(m3,m4,test="Chisq")
+anova(m3,m5,test="Chisq")
+```
+
+Many terms seem to be insignificant here, but it's OK since we have confidence that it should be included in the model from the OLS model. Also the chi-squared test indicates the reduced model **m3** which only employs raw features is insufficient. If we exclude insignificant variables, new model **m5** has a similar deviance with the original model with only raw features. Therefore, I decided to choose model **m4**.
+
+```{r}
+mpg_fit=predict(m4,newdata = testing,type="response")
+mpg_test=as.logical(testing$mpg_binary)
+confusionMatrix(data=(mpg_fit>0.5),reference = mpg_test)
+roc.fit=roc(mpg_test~mpg_fit);roc.fit
+plot.roc(roc.fit)
+```
+
+Testing error rate for logistic regression is 0.0756, 95% CI is (0.0361, 0.1422).
+
+#### B. Gradient Boosting Trees
+
+Use Caret to tune parameters.
+
+```{r, warning=FALSE, message=FALSE,results="hide"}
+n.trees=c(120,140,160)
+interaction.depth=c(3,4,5,6)
+shrinkage=c(0.01,0.02,0.05,0.1)
+n.minobsinnode=c(5,10,15)
+
+para=expand.grid(n.trees=n.trees,
+                 interaction.depth=interaction.depth,
+                 shrinkage=shrinkage,
+                 n.minobsinnode=n.minobsinnode)
+
+m6=train(factor(mpg_binary)~cylinders+displacement+horsepower+weight+
+         acceleration+year+origin+sw+dhratio,
+         data=training,method="gbm",tuneGrid=para)
+```
+
+Indeed I ran the train() function several times before and found the close region for parameters. The procedure showed above is just the last step. Also, since tree is good at modeling nonlinear relation, I don't need to include interaction terms.
+
+```{r, fig.align='center'}
+m6.fit=m6$finalModel
+
+mpg_fit=predict(m6.fit,newdata = 
+                  testing[,c(2,3,4,5,6,7,8,13,15)],n.trees=80)
+mpg_test=as.logical(testing$mpg_binary)
+confusionMatrix(data=(mpg_fit<0.5),reference = mpg_test)
+roc.fit=roc(mpg_test~mpg_fit);roc.fit
+plot.roc(roc.fit)
+```
+
+The error rate of Gradient boosting trees is 0.0517, 95% CI is (0.1092, 0.0192).
+
+#### C. Other Findings
+
+1. American car seems more fuel inefficient, but they were trying to improve it and was catching up with Japanese and European cars.
+
+2. Cars with lower displacement/horsepower ratio tend to perform better in mpg.
+
+3. Different brand has different fuel strageties, but brands of same origin tend have similar pattern.
+
+4. Acceleration seems not to have much influence on mpg as expected.
+
+5. Logistics regression performs comparably with gradient boosting trees. Their accuracy confidence interval overlap.
+
+6. No significant outlier is obvious from graphs.
+
+7. AUC of logistic regression is 0.9896, of GBM is 0.9911. 
+
+
+Guanzhong You
+Apr 2, 2017
